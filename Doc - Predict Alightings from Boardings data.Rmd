@@ -1,0 +1,1096 @@
+---
+title: "Predicting Alightings from Boardings"
+author: "Santiago Toso"
+output:
+  html_document:
+    number_sections: yes
+    theme: cosmo
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r include=FALSE}
+# Libraries
+library(ggplot2)
+library(reshape2)
+library(fastDummies)
+library(tidyverse)
+library(pryr)
+library(dplyr)
+library(plotly)
+library(scales)
+library(knitr)
+library(caret)
+```
+
+# Context
+
+The idea of this doc is to explain the different models we tried in order to predict alightings from boardings data.
+The data used in this document comes from MBTA's ridership data and GTFS we have available in Remix. The data has been processed in order to generate different variables that allow us to *abstract* the attributes that make one data point different from the other. An explanation of the variables will be given below.
+
+# Data
+
+As we said, the data is combination of ridership data and GTFS that was processed in order to create different variables.
+
+The data is combination of ridership data and GTFS that was processed in order to create different variables.
+
+The variables the data has right now are:
+
+1.**stop_sequence**: number with the sequence of the stop in that direction of the route.
+
+2.**bpsw**: boardings per stop and window
+
+3.**bprw**: boardings per route and window
+
+4. **tpsw**: trips per stop and window
+
+5. **tprw**: trips per route and window
+
+6. **b_ratio**: ratio between the boardings on that stop and the total number of boadings in the route for that direction and window
+
+7. **b_ratio_opposite**: boardings in the stop in the opposite direction and peak divided the total number of boardings in the opposite direction of the route.
+
+8. **t_ratio**: same as `b_ratio` but with trips
+
+9. **dist**: distance to the closest stop in the opposite direction
+
+10. **avgdr**: average distance between opposite stops for the whole route
+
+11. **direction_id**: *boolean* 0 or 1 depending on the direction (afterwards transformed in a dummy variable)
+
+12. **peak**: *categorical* variable indicating if the trip takes place in the AM or PM peak.
+
+13. **n_patterns**: number of patterns of the line.
+
+14. **symm_meters**: Hausdorff distance between both directions of the line.
+
+15. **pop_buffer**: population within 200 meters of the stop.
+
+16. **jobs_buffer**: jobs within 200 meters of the stop.
+
+It is important to notice that *boolean and categorical variables will be transformed to dummy variables* to make them fit in regression models.
+
+We also create variations of the numerical variables since sometimes models achieve better results with them:
+
+17. **sq...**: the square of numerical variables.
+
+18. **sr...**: the square root of numerical variables.
+
+We don't do the log since they will go through a Box-Cox transformation later to help normalize the distribution.
+
+# Pre-processing and exploration
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+predictors <- read_csv("/Users/santiagotoso/GoogleDrive/Master/Python/alightings from boardings/dataset/dataset.csv")
+
+y <- read_csv("/Users/santiagotoso/GoogleDrive/Master/Python/alightings from boardings/dataset/Y.csv")
+y <- y[[1]]
+```
+
+```{r}
+summary(predictors)
+```
+
+
+```{r include=FALSE}
+# Create dummy variables
+dataset <- predictors %>% 
+  dummy_cols(select_columns = c('direction_id', 'peak'), 
+             remove_first_dummy = TRUE) %>% 
+  select(-direction_id, -peak, -route_id, -stop_id, -b_opposite)
+```
+
+
+```{r include=FALSE}
+# Create some more variables
+dataset1 <- dataset
+# dataset1 <- dataset %>% 
+#   mutate(sqbpsw = bpsw^2,
+#          sqbprw = bprw^2,
+#          sqtpsw = tpsw^2,
+#          sqtprw = tprw^2,
+#          sqb_ratio = b_ratio^2,
+#          #sqb_opposite = b_opposite^2,
+#          sqb_ratio_opposite = b_ratio_opposite^2,
+#          sqt_ratio = t_ratio^2,
+#          sqdist = dist^2,
+#          sqavgdr = avgdr^2,
+#          sqrps = rps^2,
+#          sqsymm_meters = symm_meters^2,
+#          sqn_patters = n_patterns^2,
+#          sqbuffer_pop = buffer_pop^2,
+#          sqbuffer_jobs = buffer_jobs^2,
+#          # Square root
+#          srbpsw = sqrt(bpsw),
+#          srbprw = sqrt(bprw),
+#          srtpsw = sqrt(tpsw),
+#          srtprw = sqrt(tprw),
+#          srb_ratio = sqrt(b_ratio),
+#          #srb_opposite = sqrt(b_opposite),
+#          srb_ratio_opposite = sqrt(b_ratio_opposite),
+#          srt_ratio = sqrt(t_ratio),
+#          srdist = sqrt(dist),
+#          sravgdr = sqrt(avgdr),
+#          srrps = sqrt(rps),
+#          srsymm_meters = sqrt(symm_meters),
+#          srn_patters = sqrt(n_patterns),
+#          srbuffer_pop = sqrt(buffer_pop),
+#          srbuffer_jobs = sqrt(buffer_jobs)#,
+#          # Log
+#          # logbpsw = log(bpsw),
+#          # logbprw = log(bprw),
+#          # logtpsw = log(tpsw),
+#          # logtprw = log(tprw),
+#          # logb_ratio = log(b_ratio),
+#          # #sqb_opposite = b_opposite^2,
+#          # logb_ratio_opposite = log(b_ratio_opposite),
+#          # logt_ratio = log(t_ratio),
+#          # logdist = log(dist),
+#          # logavgdr = log(avgdr),
+#          # logrps = log(rps),
+#          # logsymm_meters = log(symm_meters),
+#          # logn_patters = log(n_patterns),
+#          # logbuffer_pop = log(buffer_pop),
+#          # logbuffer_jobs = log(buffer_jobs)
+#  )
+
+```
+
+## Data Exploration
+
+We will start exploring our data by creating a summary of our variables. Take a look at the dummy variables out there.
+
+```{r echo=FALSE}
+summary(dataset)
+```
+
+What we see:
+* No `Na` values. 
+* The maximum distance between a stop and the opposite direction is almost 3km, this is a bit strange and speaks of a line that has no symmetry.
+
+That summary doesn't give us a lot of information. Let's take a look at skewness.
+
+```{r echo=FALSE, message=FALSE}
+sixVar <- melt(dataset)
+ggplot(sixVar, aes(value)) + facet_wrap(~variable, scales = 'free_x') +
+  #geom_area(stat = 'bin', binwidth = function(x) 2 * IQR(x) / (length(x)^(1/3)), fill = '#41b6c4') +
+  # If we wanted to see histograms or frequency curves instead of the area graph we could use the next lines
+  geom_histogram(binwidth = function(x) 2 * IQR(x) / (length(x)^(1/3)), fill = '#41b6c4') +
+  # geom_freqpoly(binwidth = function(x) 2 * IQR(x) / (length(x)^(1/3)), color = '#41b6c4') +
+  theme(panel.grid = element_blank(),
+        panel.background = element_blank(),
+        axis.line.x = element_line(colour = "grey"),
+        axis.line.y = element_line(colour = "grey"),
+        #axis.text.y = element_blank(),
+        axis.ticks.x = element_line(colour = "grey"),
+        axis.ticks.y = element_line(colour = "grey")
+        )
+```
+
+What we see from this graph is that the variables related with boardings are very skewed. Variables that have to do with trips are also skewed but not as much as the other ones. We will need to do some transformations to fix this before going forward.
+
+After a Box-Cox transformation to fix the skewness, centering and scaling our variables to have them all in the same scale this is how they look:
+
+```{r include=FALSE}
+bc <- preProcess(data.frame(dataset), 
+                                   method = c('BoxCox', 'center', 'scale'))
+
+# Apply the transformation to predictors
+bct <- predict(bc, data.frame(dataset))
+```
+
+```{r, echo=FALSE, message=FALSE}
+bct_melt <- melt(bct)
+ggplot(bct_melt, aes(value)) + facet_wrap(~variable, scales = 'free_x') +
+  #geom_area(stat = 'bin', binwidth = function(x) 2 * IQR(x) / (length(x)^(1/3)), fill = '#41b6c4') +
+  # If we wanted to see histograms or frequency curves instead of the area graph we could use the next lines
+  geom_histogram(binwidth = function(x) 2 * IQR(x) / (length(x)^(1/3)), fill = '#41b6c4') +
+  # geom_freqpoly(binwidth = function(x) 2 * IQR(x) / (length(x)^(1/3)), color = '#41b6c4') +
+  theme(panel.grid = element_blank(),
+        panel.background = element_blank(),
+        axis.line.x = element_line(colour = "grey"),
+        axis.line.y = element_line(colour = "grey"),
+        #axis.text.y = element_blank(),
+        axis.ticks.x = element_line(colour = "grey"),
+        axis.ticks.y = element_line(colour = "grey")
+        )
+```
+
+We couldn't solve the skewness of all the variables but it certainly improved the holistic picture. We can see how the variables related with trips improved. This should help our models a bit. 
+
+## Principal Components Analysis (PCA)
+
+The previous transformation helped us with the skewness but we still have a lot of variables in our dataset (60!). This doesn't help our model and it can result in over-fitting. 
+
+To help us reduce the amount of variables we are going to use a PCA analysis. PCA creates linear combinations of the different variables of the dataset in a way that they explain the variability of our target with less predictor. These new predictors (the linear combinations of our original variables) are called "Principal Components".
+
+```{r}
+pcaObject <- prcomp(dataset1,
+                    center = TRUE,
+                    scale. = TRUE)
+```
+
+We could check the cumulative percentage of variance which each component accounts for and then make a graph of it.
+
+```{r}
+percentVariance <- (pcaObject$sdev^2) / sum(pcaObject$sdev^2) * 100
+percentVariance[1:3]
+```
+
+We see graphically how much each of the componenets helps us explain the variability of our target. We create a line in the 12th variable since it is that is the last variable the PCA method considered.
+
+```{r}
+dfPercentVariance<- as.data.frame(percentVariance)
+
+dfPercentVariance <- dfPercentVariance %>% 
+  mutate(comp = c(1:length(percentVariance)))
+
+ggplot(data = dfPercentVariance, aes(x = comp, y = percentVariance)) +
+  geom_point(color = '#41b6c4') + 
+  geom_line(color = '#41b6c4') +
+  theme(panel.grid = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "grey"),
+        axis.ticks = element_line(colour = "grey")
+        ) +
+   annotate("segment", x = 12, xend = 12, y = 0, yend = 20, colour = "red")
+```
+
+This clearly heps reduce the number of variables. We can also see that from the 10th component on they explain a very small percentage of the variance so it is logical to suppose that our results wouldn't improve a lot if we use them. That been said, our model should use ~10 PC.
+
+In the following section we will apply this transformations to all the input data of the models.
+
+> A note about outliers: from the graphs we see above, it is very probable we have stops with very high boardings values that would statistically be outliers. We choose not to treat them here by changing its value because these stops are very important to the problem. Instead, we use a method called "Spatial Signal" in the models that are more susceptible to outliers.
+
+## Data Partition
+
+We will do various things in this section.
+
+* Create our train (80%) and test (20%) sets  
+* Create our transformed train and test sets
+
+### Train and Test sets
+
+We create the train and test set.
+
+```{r}
+set.seed(1)
+trainingRows <- createDataPartition(y,
+                                    p = .8,
+                                    list = FALSE)
+
+# Training data
+trainPredictors <- dataset1[trainingRows, ]
+trainTarget <- y[trainingRows]
+
+# Testing data
+testPredictors <- dataset1[-trainingRows, ]
+testTarget <- y[-trainingRows]
+```
+
+We are also going to save the information about routes, directions and stops to analyze it futher after having the results of the models.
+
+```{r}
+metadata <- predictors %>% 
+  select(route_id, direction_id, stop_id, n_patterns, symm_meters )
+
+trainMetadata <- metadata[trainingRows, ]
+testMetadata <- metadata[-trainingRows, ]
+```
+
+### Transformed Train and Test sets
+
+We will now apply the same transformations we saw in the previous section.
+
+```{r}
+# Create the Transformation for predictors
+trainPredictorsTrans <- preProcess(data.frame(trainPredictors), 
+                                   method = c('BoxCox', "center", "scale"))
+
+testPredictorsTrans <- preProcess(data.frame(testPredictors), 
+                                  method = c('BoxCox', "center", "scale"))
+
+# Apply the transformation to predictors
+trainPredTransformed <- predict(trainPredictorsTrans, data.frame(trainPredictors))
+
+testPredTransformed <- predict(testPredictorsTrans, data.frame(testPredictors))
+```
+
+# Modeling
+
+## Considerations before reading
+
+For each model created the steps followed are:
+
+1. Train the model with the training data (and sometimes tune the parameters)
+
+2. Test the model with the test data
+
+3. Overwrite negative predictions
+
+4. Plot predictions vs observations
+
+The reader won't find these steps in each of the model sections. On each of the sections we only show the results of the model working with the test data, which is what we need to take into account to choose a model.
+
+In some sections there is some extra information about the tunning of the models but nothing else.
+
+If the reader wants to see the full process for each model, he/she should check this [document](https://drive.google.com/open?id=1IJImDn7xsWJhrYLNPLS_R7ra1zrGKQF5).
+
+>Note step "3.Overwrite negative predictions". Mathematically, the models can give negative values but this doesn't make any sense from a business perspective. For that reason we'll overwrite negative values with a 0.
+
+## Model evaluation
+
+The metrics used to evaluate the models are:
+
+**Coefficient of determination (R2)**: is the proportion of the variance in the dependent variable that is predictable from the independent variable(s). In other words, how much of the variation of our target variable we can explain with the model we have. A higher value of R2 is better.
+
+**Root Mean Square Error (RMSE)**: is the standard deviation of the residuals (prediction errors). Residuals are a measure of how far from the regression line data points are; RMSE is a measure of how spread out these residuals are. In other words, *it tells you how concentrated the data is around the line of best fit.* We are looking for small values of RMSE.
+
+## Symmetry in opposite directions and peaks
+
+Before we start doing complicated models, we are going to compare the alightings with the boardings in the opposite direction and peak. This will give us a reference and will allow us to better evaluate our models later. 
+
+For this "model" we will calculate the same metrics we'll use to evaluate the performance of the models that are coming later.
+
+We can now compare the actual alightings with the boardings in the opposite direction of the route in the other peak and see how it goes.
+
+```{r echo=FALSE}
+source("/Users/santiagotoso/GoogleDrive/Master/R/Functions/predObsPlot.R")
+gsymm1 <- plot.pred(predictors$b_opposite, y, title = 'Symmetry for all lines')
+gsymm1
+```
+
+The result doesn't seem very promising from a holistic point of view. When we analyzed the results line by line we saw that some of them showed a great performance, but the model just doesn't seem reliable to apply it to any line.
+
+This is what we've done so far. Everything that comes after this is new. 
+
+## Linear regression taking only symmetry in opposite directions and peaks
+
+Since the result above doesn't seem very good, maybe we can create a *linear regression* between the boardings in the opposite direction and the alightings instead of just asigning the value ourselves. Let's see how that goes:
+
+```{r include=FALSE}
+b_train <- predictors[trainingRows, ]
+b_test <- predictors[-trainingRows, ]
+
+symm_trainingData <- b_train
+symm_trainingData <- b_train %>% 
+  mutate(alightings = trainTarget)
+
+symmFit <- lm(alightings ~ b_opposite, data = symm_trainingData)
+symmPred <- predict(symmFit, b_test)
+
+symmValues <- data.frame(obs = testTarget, pred = symmPred)
+defaultSummary(symmValues)
+```
+```{r echo=FALSE}
+gsymm <- plot.pred(symmValues$pred, symmValues$obs, title = 'Linear Regression with Opposite Boardings only')
+gsymm
+```
+
+This looks much more promising for a first aproach!
+
+## Ordinary Linear Regression
+
+Now we'll give it a try to an Ordinary Linear Regression but this time we are going to use all the variables.
+
+```{r include=FALSE}
+trainingData <- trainPredictors
+trainingData <- trainingData %>% 
+  mutate(alightings = trainTarget)
+```
+```{r include=FALSE}
+lmFitAllPredictors <- lm(alightings ~ ., data = trainingData)
+summary(lmFitAllPredictors)
+```
+```{r include=FALSE}
+lmPred1 <- predict(lmFitAllPredictors, testPredictors)
+
+lmValues <- data.frame(obs = testTarget, pred = lmPred1)
+defaultSummary(lmValues)
+```
+```{r echo=FALSE}
+# Scatter plot predicted vs observed
+source("/Users/santiagotoso/GoogleDrive/Master/R/Functions/predObsPlot.R")
+plot.pred(lmValues$pred, lmValues$obs, title = 'Linear Regression')
+```
+
+```{r}
+lmValues <- lmValues %>% 
+  mutate(pred = ifelse(pred<0, 0,pred))
+
+lmValues %>% filter(pred<0)
+```
+
+```{r echo=FALSE}
+# Scatter plot predicted vs observed
+source("/Users/santiagotoso/GoogleDrive/Master/R/Functions/predObsPlot.R")
+plot.pred(lmValues$pred, lmValues$obs, title = 'Linear Regression')
+```
+
+It seems like all the other variables have actually a pretty negative impact on the linear regression model. Let's keep trying.
+
+## Penalized Regression Models (Elastic Net)
+
+These models are a variant of Linear Regression models where we give the different variables a weight that varies along the model. Like this, some variables start playing a part earlier in the model than others. 
+
+Something interesting about these models is that they also allow us to see what are the variables with higher influence in the predictions and how they affect it.
+
+### Ridge Regression
+
+```{r include=FALSE}
+library(elasticnet)
+
+# We can start with a Ridge Regression. For ridge regression, we only desire a single lasso penalty of 0, so we want the full solution. To produce a ridge-regression solution we define `s=1` with `mode = fraction`. These last options specify the fraction of the full solution we want the ridge regression to be. `s=1` means we want the full solution to be ridge (no lasso); while `s=0` would mean we want the full solution to be lasso (no ridge):
+
+#Train
+ridgeModel <- enet(x = as.matrix(trainPredTransformed), y = trainTarget,
+                   lambda = 0.001)
+# Predict
+ridgePred <- predict(ridgeModel, newx = as.matrix(testPredTransformed),
+                     s = 1, mode = 'fraction',
+                     type = 'fit')
+# Evaluate
+ridgeValues <- data.frame(obs = testTarget, pred = ridgePred$fit)
+defaultSummary(ridgeValues)
+
+# We have created a ridge regression and aplied it to the test set. No lasso was created since we 
+# specified a `s=1` in the predict function. If we want to use the lasso, we need to make s different 
+# than one to try different lasso penalties.
+```
+
+Let's see how the Ridge regression did. We used a lambda = 0.001 and a fraction = 1 (full Ridge, no Lasso).
+```{r, echo=FALSE}
+plot.pred(ridgeValues$pred, ridgeValues$obs, title = 'Ridge Regression')
+```
+
+Not an improvement.
+
+```{r}
+ridgeValues <- ridgeValues %>% 
+  mutate(pred = ifelse(pred<0, 0,pred))
+
+ridgeValues %>% filter(pred<0)
+```
+
+```{r, echo=FALSE}
+plot.pred(ridgeValues$pred, ridgeValues$obs, title = 'Ridge Regression')
+```
+
+### Lasso
+
+Until now, we have been working with a simple 80-20 partition between train and test set. Nonetheless, we can try a _cross-validation_ method in order to improve our results and lower overfitting to the train set. To do so we'll make sure to create a control cross-validation. More on how cross-validation works [here](https://towardsdatascience.com/why-and-how-to-cross-validate-a-model-d6424b45261f).
+
+```{r}
+ctrl <- trainControl(method = 'cv', number = 10)
+```
+
+These models also give us the possibility to play with its parameters and choose the best out of a number of different combinations. 
+
+```{r include=FALSE}
+enetGrid <- expand.grid(.lambda = c(0, 0.01, 0.1),
+                        .fraction = seq(.05, 1, length = 20))
+set.seed(100)
+enetTune <- train(trainPredTransformed, trainTarget,
+                  method = 'enet',
+                  tuneGrid = enetGrid,
+                  trControl = ctrl,
+                  preProcess = 'spatialSign')
+```
+```{r}
+enetTune$bestTune
+```
+
+```{r echo=FALSE}
+source("/Users/santiagotoso/GoogleDrive/Master/R/Functions/enetPlotCompare.R")
+g1 <- enetPlotCompare(enetModel = enetTune)
+g1
+```
+
+From there we can see that the lowest RMSE was achieved with a `lambda = 0` and a `fraction = 0.1` so that's the model we'll use.
+
+```{r include=FALSE}
+enetModel <- enet(x = as.matrix(trainPredictors), y= trainTarget,
+                  lambda = 0.1, normalize = TRUE)
+
+enetPred <- predict(enetModel, newx = as.matrix(testPredictors),
+                    s = .75, mode = 'fraction',
+                    type = 'fit')
+
+# Check our findings
+enetValues <- data.frame(obs = testTarget, pred = enetPred$fit)
+defaultSummary(enetValues)
+```
+
+Now we can check how the different variables influence the model.
+
+```{r echo=FALSE, message=FALSE}
+source("/Users/santiagotoso/GoogleDrive/Master/R/Functions/enetPlot.R")
+g <- enetPlot(enetModel = enetTune, L1norm = 1300, maxlegend = 40)
+ggplotly(g)
+```
+From the interactive plot we can see that the first variable to play a part is `b_ratio_positive` which actually makes sense since we expect some symmetry. 
+
+The second variable to enter in the model is it's variation with the square. Both variables have a positive slope which means that the alightings are higher when these variables are higher. This makes complete sense and reasure us that the model is not doing anything strange.
+
+Third variable is the boardings per route and window. After that, many other variables play a part.
+
+
+Let's see how the model performns in predictions.
+
+```{r echo=FALSE}
+genet <- plot.pred(enetValues$pred, testTarget, title = 'Elastic Net - lambda = 0.1, fraction = 0.95')
+genet
+```
+
+```{r}
+enetValues <- enetValues %>%
+  mutate(pred = ifelse(pred<0, 0, pred))
+
+enetValues %>% filter(pred<0)
+```
+
+
+```{r echo=FALSE}
+genet <- plot.pred(enetValues$pred, testTarget, title = 'Elastic Net - lambda = 0.1, fraction = 0.95')
+genet
+```
+
+So far we haven't improved the result we got from the linear regression between boardings in opposite directions and peaks.
+
+## Neural Networks
+
+### Simple Neural Network
+
+```{r include=FALSE}
+library(nnet)
+
+# Simple NN
+nnetFit <- nnet(trainPredTransformed, trainTarget,
+                size = 5,
+                decay = 0.01,
+                linout = TRUE,
+                # Reduce the amount of printed output
+                trace = FALSE,
+                # Expand the number of iterations to find
+                # parameter estimates...
+                maxit = 500,
+                # add the number of parameters used by the model
+                MaxNWts = 5 * (ncol(trainPredTransformed) + 1) + 5 + 1)
+nnetFit
+```
+```{r include=FALSE}
+nnetPred <- predict(nnetFit, testPredTransformed)
+nnetValues <- data.frame(pred = nnetPred, obs = testTarget)
+nnetSummary <- defaultSummary(nnetValues)
+nnetSummary # RMSE = 32.426, R2 = 0.466
+```
+
+Let's see how a NN works.
+```{r echo=FALSE}
+gnnet <- plot.pred(nnetPred, testTarget, title = 'Neural Network')
+gnnet
+```
+
+It is the best result we got so far.
+
+```{r}
+# enetValues <- enetValues %>%
+#   mutate(pred = ifelse(pred<0, 0, pred))
+
+data_frame(nnetPred) %>% filter(nnetPred<0)
+```
+It looks like there are no negative values on this one.
+
+### Average Neural Network
+
+This model makes an average of different variations of NN.
+
+```{r include=FALSE}
+# To use the model averaging, the avNNet function in the caret package has a nearly identical syntax.
+nnetAvg <- avNNet(trainPredTransformed, trainTarget,
+                  size = 5,
+                  decay = 0.01,
+                  # Specify how many models to average
+                  repeats = 5,
+                  linout = TRUE,
+                  # Reduce the amount of printed output
+                  trace = FALSE,
+                  # Expand the number of iterations to find
+                  # parameter estimates...
+                  maxit = 500,
+                  # add the number of parameters used by the model
+                  MaxNWts = 5 * (ncol(trainPredTransformed) + 1) + 5 + 1)
+
+nnetAvg
+```
+```{r include=FALSE}
+avgPred <- predict(nnetAvg, testPredTransformed)
+avgValues <- data.frame(pred = avgPred, obs = testTarget)
+avgSummary <- defaultSummary(avgValues)
+avgSummary
+```
+```{r, echo=FALSE}
+gavnnet <- plot.pred(avgPred, testTarget, title = 'Average Neural Network')
+gavnnet
+```
+
+The result is pretty similar to the one we had before.
+
+```{r}
+avgPred <- data_frame(avgPred) %>% 
+  mutate(avgPred = ifelse(avgPred<0, 0, avgPred))
+
+avgPred %>% filter(avgPred<0)
+```
+
+```{r, echo=FALSE}
+gavnnet <- plot.pred(avgPred$avgPred, testTarget, title = 'Average Neural Network')
+gavnnet
+```
+
+
+## Support Vector Machines  (SVM)
+
+Support Vector Machines use a number of parameters and kernel functions. If the best values of these parameters are unknown, they can be estimated through resampling like we did with the Penalized Regression Models. 
+
+The parameter of the SVM is called `cost` and we can check the trade-off between cost and performance of the model.
+
+```{r include=FALSE}
+svmRTuned <- train(trainPredTransformed, trainTarget,
+                   method = "svmRadial",
+                   #preProcess = c("center", "scale"),
+                   tuneLength = 14,
+                   trControl = trainControl(method = "cv"))
+```
+
+```{r, echo=FALSE}
+source("/Users/santiagotoso/GoogleDrive/Master/R/Functions/plotModel.R")
+plot.model(svmRTuned)
+```
+
+It seems like the lower RMSE is reached for a cost of 5 (2^5).
+
+Let's see how this models performs.
+```{r include=FALSE}
+svmRPred <- predict(svmRTuned, testPredTransformed)
+```
+```{r, echo=FALSE}
+gsvmR <- plot.pred(svmRPred, testTarget, title = 'SVM - Radial Kernel')
+gsvmR
+```
+
+```{r}
+svmRPred_no_neg <- data_frame(svmRPred) %>% 
+  mutate(svmRPred = ifelse(svmRPred<0, 0, svmRPred))
+
+svmRPred_no_neg %>% filter(svmRPred<0)
+```
+```{r, echo=FALSE}
+gsvmR <- plot.pred(svmRPred_no_neg$svmRPred, testTarget, title = 'SVM - Radial Kernel')
+gsvmR
+```
+
+```{r}
+to_csv_svm <- svmRPred_no_neg %>% 
+  mutate(target = testTarget)
+
+write_csv(to_csv_svm,'/Users/santiagotoso/Desktop/to_csv_svm.csv')
+```
+
+
+It looks like the best model so far.
+
+## K-Nearest Neighbors
+
+K-Nearest Neighbors is a model that predicts the behavior of sample taking into account how the samples that are similar to it behave. The main parameter of this model is `k`, which is *the number of neighbors to take into account*.
+
+Before jumping into the model, we could try to filter those variables that have too many zeros.
+```{r}
+# Remove a few sparse and unbalanced values first
+nearZeroVar(trainPredTransformed)
+#knnDescr <- trainPredTransformed[ , -nearZeroVar(trainPredTransformed)]
+```
+It seems like none of the variables should be removed taking into account this approach.
+
+In the same way we did before, we can try different values of `k` and analyze the performance of the model.
+
+```{r include=FALSE}
+set.seed(100)
+knnTune <- train(trainPredTransformed, trainTarget,
+                 method = "knn",
+                 # Center and scaleing will occur for new predictions too
+                 #preProcess = c("center", "scale"),
+                 tuneGrid = data.frame(.k = 1:20),
+                 trControl = trainControl(method = "cv"))
+```
+```{r, echo=FALSE}
+plot.model(knnTune)
+```
+
+It seems like `k=4` is the way to go.
+
+Let's see how well it predicts with the test data.
+
+```{r, echo=FALSE}
+knnPred <- predict(knnTune, testPredTransformed)
+gknn <- plot.pred(knnPred, testTarget, title = "5 - Nearest Neighboor")
+gknn
+```
+
+```{r}
+data_frame(knnPred) %>% filter(knnPred<0)
+```
+No negative values on this one.
+
+Wow! The R2 is as high as the one for SVM but the RMSE is a bit higher.
+
+# Model comparison
+
+After all we've done it could be useful to take a look at all the results in one place.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+library(gridExtra)
+source("/Users/santiagotoso/GoogleDrive/Master/R/Functions/plotGrid.R")
+plot.grid(gsymm1,
+          gsymm,
+          gnnet, 
+          gavnnet, 
+          gsvmR, 
+          gknn, 
+          residuals = FALSE)
+```
+
+From we understand here, it seems like the model we currently have, Symmetry for all lines, is not a good way to go. Just doing the linear regression taking only the boardings in the opposite direction as a variable was very strong. Nonetheless, some of our models improved the overall performance over it. It seems like the best one is the **Support Vector Machine**. 
+
+**This is inline with our first iteration of the model, but in that first iteration the R2 was 0.8**. It seems like the new variables have made the overall performance of the SVM a bit worse. We need to take a deeper look on this to see what is going on.
+
+We can also compare the residuals. The more random the behavior the residuals show the better we expect the model to perform.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+source("/Users/santiagotoso/GoogleDrive/Master/R/Functions/predObsPlot.R")
+rgsymm1 <-plot.pred(predictors$b_opposite, y, title = 'Symmetry for all lines', residuals = TRUE)
+rgsymm <-plot.pred(symmValues$pred, symmValues$obs, title = 'Symmetry for all lines',residuals = TRUE)
+rgnnet <- plot.pred(nnetPred, testTarget, title = 'Neural Network',residuals = TRUE)
+rgavnnet <- plot.pred(avgPred$avgPred, testTarget, title = 'Average Neural Network',residuals = TRUE)
+rgsvm <- plot.pred(svmRPred, testTarget, title = "SVM Radial",residuals = TRUE)
+rgknn <- plot.pred(knnPred, testTarget, title = "5 - Nearest Neighboor",residuals = TRUE)
+
+source("/Users/santiagotoso/GoogleDrive/Master/R/Functions/plotGrid.R")
+plot.grid(
+  rgsymm1,
+  rgsymm,
+  rgnnet, 
+  rgavnnet,
+  rgsvm, 
+  rgknn, 
+  residuals = TRUE)
+```
+We see that the only model that shows a clear trend in the residuals is the one we are using right now.
+
+We also know from previous analysis that Symmetry model has a very high performance for some lines. We will compare the values line by line and see what happens.
+
+# Dig in more
+
+Now that we chose SVM as our model, we can explore the behavior of our model line by line and maybe compare it with the Linear Regression taking only the boardings in the opposite direction. Even is this model has a lower performance, it is very simple, so it might be worth taking a look before discarding it.
+
+
+```{r include=FALSE}
+testRoutes <- testMetadata %>% 
+  mutate(
+    peak_PM = testPredictors$peak_PM,
+    svm = svmRPred,
+    symm = symmPred,
+    svm_no_neg = svmRPred_no_neg$svmRPred,
+    obs = testTarget) %>% 
+  select(-n_patterns, -symm_meters)
+
+head(testRoutes)
+```
+```{r, echo=FALSE}
+g <- ggplot(data = testRoutes, aes(x = svm, y = obs, alpha = 0.5)) +
+  geom_point(color = '#41b6c4') +
+  #geom_abline(alpha = alpha) +
+  #labs(title = title, subtitle = subtitle, x = x, y = y) +
+  theme(panel.grid = element_line(colour = "grey"),
+        panel.background = element_blank(),
+        axis.line.x = element_line(colour = "grey"),
+        axis.line.y = element_line(colour = "grey"),
+          #axis.text.x = element_blank(),
+          #axis.text.y = element_blank(),
+        axis.ticks.x = element_line(colour = "grey"),
+        axis.ticks.y = element_line(colour = "grey"),
+        legend.position = "none"
+    )  +
+  facet_wrap(~route_id)
+  
+ggplotly(g)
+```
+
+```{r}
+results <- testRoutes %>% 
+  group_by(route_id, peak_PM,direction_id, stop_id) %>% 
+  summarise(svm = mean(svm),
+            symm = mean(symm),
+            svm_no_neg = mean(svm_no_neg),
+            obs = mean(obs))
+
+head(results)
+```
+
+```{r}
+# Export the results to a .csv to visualize the load
+
+write.csv(results,"/Users/santiagotoso/GoogleDrive/Master/Python/alightings from boardings/3- Load/results.csv", row.names = FALSE)
+```
+
+From what we see graphically it seems like the performance of the model varies a lot depending on the route. We can compare the R2 for SVM and the symmetry model for each line.
+
+```{r include=FALSE}
+routes <- unique(testRoutes$route_id)
+Rsquared <- data.frame(matrix(ncol = 2, nrow = 0))
+
+for (route in routes) {
+  tmp <- testRoutes %>% 
+    filter(route_id == route)
+  R2i <-R2(tmp$obs, tmp$svm)
+  R2j <-R2(tmp$obs, tmp$symm)
+  R2k <-R2(tmp$obs, tmp$svm_no_neg)
+  Rsquared <- rbind(Rsquared, c(route, R2i, R2j, R2k))
+}
+
+x <- c("route_id", "svmR2", "symmR2", "svmR2_no_neg")
+colnames(Rsquared) <- x
+```
+```{r echo=FALSE}
+library(knitr)
+kable(arrange(Rsquared, desc(svmR2)))
+```
+
+```{r}
+Rsquared <- arrange(Rsquared, desc(svmR2))
+
+# Basic barplot
+p<-ggplot(data=Rsquared, aes(x=reorder(route_id, svmR2), y=svmR2)) +
+  geom_bar(stat="identity",aes(fill ='positive')) +
+  geom_hline(yintercept = 0.75, linetype='dashed') +
+  labs(title = 'R2 by route', x = 'Route', y = 'R2') +
+  theme(panel.grid = element_blank(),
+        panel.grid.major.x = element_line(colour = "grey"),
+        panel.background = element_blank(),
+        #axis.line.x = element_blank(),
+        axis.line.y = element_line(colour = "black"),
+        #axis.text.x = element_blank(),
+        #axis.text.y = element_blank(),
+        axis.ticks.x = element_line(colour = "grey"),
+        axis.ticks.y = element_line(colour = "grey"),
+        #axis.title.y = element_blank()
+        legend.position = "none"
+    ) +
+  geom_text(aes(x = route_id, y=svmR2-.01, label=round(svmR2,2), 
+                hjust=ifelse(sign(svmR2)>0, 1, 0)), 
+            position = position_dodge(width=1)) +
+  scale_y_continuous(labels = percent_format()) +
+  coord_flip()
+p
+```
+```{r}
+write_csv(Rsquared, "/Users/santiagotoso/Desktop/Rsquared.csv")
+```
+
+
+In the table we see that, even if the SVM metrics for the whole dataset are better, in some lines the symmetry linear regression perfoms better. Let's take a look at it graphically.
+
+```{r, echo=FALSE}
+Rsquared$route_id <- factor(Rsquared$route_id)
+Rsquared1 <- Rsquared %>% 
+  mutate(diff = as.vector(Rsquared$svmR2 - Rsquared$symmR2),
+         colour = ifelse((Rsquared$svmR2 - Rsquared$symmR2)<0, 'negative', 'positive'))
+
+ggplot(Rsquared1,aes(x = reorder(route_id, diff), y = diff, label=''))+
+  geom_bar(stat="identity",position="identity",aes(fill = colour)) +
+  geom_hline(yintercept = 0) +
+  labs(title = 'Difference in R2 - SVM vs Linear', x = 'Route', y = 'Difference') +
+  theme(panel.grid = element_blank(),
+        panel.grid.major.y = element_line(colour = "grey"),
+        panel.background = element_blank(),
+        axis.line.x = element_blank(),
+        axis.line.y = element_line(colour = "black"),
+        axis.text.x = element_blank(),
+        #axis.text.y = element_blank(),
+        axis.ticks.x = element_line(colour = "grey"),
+        axis.ticks.y = element_line(colour = "grey"),
+        #axis.title.y = element_blank()
+        legend.position = "none"
+    ) +
+  geom_text(aes(x = route_id, y=diff, label=round(diff,2), 
+                hjust=ifelse(sign(diff)>0, 1, 0)), 
+            position = position_dodge(width=1)) +
+  scale_y_continuous(labels = percent_format()) +
+  coord_flip()
+# ggplotly(g)
+```
+
+```{r, echo=FALSE}
+Rsquared$route_id <- factor(Rsquared$route_id)
+Rsquared1 <- Rsquared %>% 
+  mutate(diff = as.vector(Rsquared$svmR2 - Rsquared$svmR2_no_neg),
+         colour = ifelse((Rsquared$svmR2 - Rsquared$svmR2_no_neg)<0, 'negative', 'positive'))
+
+ggplot(Rsquared1,aes(x = reorder(route_id, diff), y = diff, label=''))+
+  geom_bar(stat="identity",position="identity",aes(fill = colour)) +
+  geom_hline(yintercept = 0) +
+  labs(title = 'Difference in R2 - SVM vs SVM with no negatives', x = 'Route', y = 'Difference') +
+  theme(panel.grid = element_blank(),
+        panel.grid.major.y = element_line(colour = "grey"),
+        panel.background = element_blank(),
+        axis.line.x = element_blank(),
+        axis.line.y = element_line(colour = "black"),
+        axis.text.x = element_blank(),
+        #axis.text.y = element_blank(),
+        axis.ticks.x = element_line(colour = "grey"),
+        axis.ticks.y = element_line(colour = "grey"),
+        #axis.title.y = element_blank()
+        legend.position = "none"
+    ) +
+  geom_text(aes(x = route_id, y=diff, label=round(diff,2), 
+                hjust=ifelse(sign(diff)>0, 1, 0)), 
+            position = position_dodge(width=1)) +
+  scale_y_continuous(labels = percent_format()) +
+  coord_flip()
+# ggplotly(g)
+```
+
+```{r, echo=FALSE}
+Rsquared$route_id <- factor(Rsquared$route_id)
+Rsquared1 <- Rsquared %>% 
+  mutate(diff = as.vector(Rsquared$svmR2_no_neg - Rsquared$symmR2),
+         colour = ifelse((Rsquared$svmR2_no_neg - Rsquared$symmR2)<0, 'negative', 'positive'))
+
+ggplot(Rsquared1,aes(x = reorder(route_id, diff), y = diff, label=''))+
+  geom_bar(stat="identity",position="identity",aes(fill = colour)) +
+  geom_hline(yintercept = 0) +
+  labs(title = 'Difference in R2 - SVM vs Linear', x = 'Route', y = 'Difference') +
+  theme(panel.grid = element_blank(),
+        panel.grid.major.y = element_line(colour = "grey"),
+        panel.background = element_blank(),
+        axis.line.x = element_blank(),
+        axis.line.y = element_line(colour = "black"),
+        axis.text.x = element_blank(),
+        #axis.text.y = element_blank(),
+        axis.ticks.x = element_line(colour = "grey"),
+        axis.ticks.y = element_line(colour = "grey"),
+        #axis.title.y = element_blank()
+        legend.position = "none"
+    ) +
+  geom_text(aes(x = route_id, y=diff, label=round(diff,2), 
+                hjust=ifelse(sign(diff)>0, 1, 0)), 
+            position = position_dodge(width=1)) +
+  scale_y_continuous(labels = percent_format()) +
+  coord_flip()
+# ggplotly(g)
+```
+
+
+It seems like we have to give up a bit of performance in some routes but overall the model seems to have a better performance. 
+
+It might also be useful to take a look at this graphically.
+
+```{r, echo=FALSE}
+testRoutes1 <- testRoutes %>% 
+  select(-direction_id, -stop_id)
+
+df3 <- melt(testRoutes1, id = c('route_id', 'obs'))
+
+g <- ggplot(data = df3, aes(x = value, y = obs, alpha = 0.5, color = variable)) +
+  #geom_point(color = '#41b6c4') +
+  geom_point() +
+  #geom_abline(alpha = alpha) +
+  #labs(title = title, subtitle = subtitle, x = x, y = y) +
+  theme(panel.grid = element_line(colour = "grey"),
+        panel.background = element_blank(),
+        axis.line.x = element_line(colour = "grey"),
+        axis.line.y = element_line(colour = "grey"),
+          #axis.text.x = element_blank(),
+          #axis.text.y = element_blank(),
+        axis.ticks.x = element_line(colour = "grey"),
+        axis.ticks.y = element_line(colour = "grey")
+    )  +
+  facet_wrap(~route_id)
+
+ggplotly(g)
+```
+
+Let's remember that the model we have right now is the first one we saw, with R2 = 0.55. I think no matter what model we choose it will be an improvement from just asigning as alighting the boardings of the stop in the opposite direction and peak.
+
+In this case I'd go with SVM because it is also a model that is inmune to outliers. This means there is one less transformation we'd need to do to the data.
+
+```{r}
+t <- testMetadata %>% 
+  group_by(route_id) %>% 
+  summarise(
+    n_patterns = mean(n_patterns),
+    symm_meters = mean(symm_meters)
+    ) %>% 
+  mutate(route_id = factor(route_id))
+
+
+t
+```
+```{r}
+routes <- Rsquared %>% 
+  left_join(t)
+
+routes
+```
+
+```{r}
+total_boardings <- predictors %>% 
+  group_by(route_id) %>% 
+  summarise(total_boardings = sum(bpsw)) %>% 
+  arrange(desc(total_boardings)) %>% 
+  mutate(route_id=factor(route_id))
+
+routes <- routes %>% 
+  left_join(total_boardings)
+
+routes
+```
+
+What we see in the plot below is that the model performs better in routes with a lot of boardings. This makes sense since these high values are the ones that shape the model.
+
+It might be a good idea to separete the lines between the ones with a lot of boardings and those with less and create models depending on that.
+```{r}
+ggplot(routes, aes(x=svmR2, y=total_boardings)) + 
+  geom_point(aes(alpha = 0.9, color = 'steelblue'))+
+  geom_smooth(method=lm, aes(color = 'green')) +
+  theme(panel.grid = element_blank(),
+        panel.background = element_blank(),
+        axis.line.x = element_line(colour = "grey"),
+        axis.line.y = element_line(colour = "grey"),
+          #axis.text.x = element_blank(),
+          #axis.text.y = element_blank(),
+        axis.ticks.x = element_line(colour = "grey"),
+        axis.ticks.y = element_line(colour = "grey")
+    ) 
+```
+
+```{r}
+pie_chart <- routes %>% 
+  mutate(group = ifelse(svmR2 < 0.7, '0.5 - 0.7', '> 0.7'))
+
+
+bp<- ggplot(pie_chart, aes(x="", y=total_boardings, fill=group)) + 
+  geom_bar(width = 1, stat = "identity")
+pie <- bp + coord_polar("y") +
+  
+pie
+```
+
+```{r}
+write_csv(pie_chart, "/Users/santiagotoso/Desktop/pie_chart.csv")
+```
+
